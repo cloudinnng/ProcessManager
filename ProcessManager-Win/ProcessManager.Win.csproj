@@ -14,6 +14,16 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
+    <!-- 裁掉未引用的托管程序集。WinUI 和 WinRT 投影整库保留，见下方 TrimmerRootAssembly。 -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <!-- WMI（System.Management）走 COM，裁剪时要保留内置 COM 互操作。 -->
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishDir>$(MSBuildThisFileDirectory)..\builds\ProcessManager-Win\publish\$(RuntimeIdentifier)\</PublishDir>
@@ -23,8 +33,94 @@
     <PackageReference Include="System.Management" Version="10.0.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- 这些库靠反射或 WinRT 激活。裁掉成员后界面启动即崩溃，所以整库保留。 -->
+    <TrimmerRootAssembly Include="System.Management" />
+    <TrimmerRootAssembly Include="Microsoft.WinUI" />
+    <TrimmerRootAssembly Include="Microsoft.Windows.SDK.NET" />
+    <TrimmerRootAssembly Include="WinRT.Runtime" />
+    <TrimmerRootAssembly Include="Microsoft.InteractiveExperiences.Projection" />
     <AssemblyMetadata Include="ProjectDirectory" Value="$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))" />
   </ItemGroup>
+  <!-- 自包含运行时来自 Windows App SDK 的 MSIX，默认带上机器学习、系统 AI 和小组件。进程管理器不用这些。 -->
+  <UsingTask TaskName="StripUnusedWindowsAppSdkServers" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <AppxManifest ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Xml" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        if (!string.IsNullOrEmpty(AppxManifest) && File.Exists(AppxManifest))
+        {
+            bool Drop(string path)
+            {
+                var name = Path.GetFileName(path);
+                return name.Equals("onnxruntime.dll", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("onnxruntime_providers_shared.dll", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("DirectML.dll", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("NPUDetect.dll", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("Microsoft.Windows.AI.", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("Microsoft.Windows.Widgets", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("Microsoft.Windows.Workloads", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var doc = new XmlDocument { PreserveWhitespace = true };
+            doc.Load(AppxManifest);
+            var ns = new XmlNamespaceManager(doc.NameTable);
+            ns.AddNamespace("m", "http://schemas.microsoft.com/appx/manifest/foundation/windows10");
+            var removed = 0;
+            foreach (var server in doc.SelectNodes("//m:InProcessServer", ns).OfType<XmlNode>().ToList())
+            {
+                var path = server.SelectSingleNode("./m:Path", ns)?.InnerText ?? "";
+                if (!Drop(path) || server.ParentNode == null || server.ParentNode.ParentNode == null)
+                    continue;
+                var extension = server.ParentNode;
+                extension.ParentNode.RemoveChild(extension);
+                removed++;
+                Log.LogMessage(MessageImportance.High, "已从激活清单移除未使用组件：" + path);
+            }
+
+            if (removed > 0)
+                doc.Save(AppxManifest);
+        }
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="StripUnusedWindowsAppSdkManifestEntries" AfterTargets="ExtractMicrosoftWindowsAppSDKMsixFiles"
+          Condition="'$(WindowsAppSDKAppxManifest)' != '' and Exists('$(WindowsAppSDKAppxManifest)')">
+    <StripUnusedWindowsAppSdkServers AppxManifest="$(WindowsAppSDKAppxManifest)" />
+  </Target>
+  <Target Name="RemoveUnusedWindowsAppSdkPayload" AfterTargets="AddMicrosoftWindowsAppSDKPayloadFilesFromMsix;AddMicrosoftWindowsAppSDKPayloadFilesFromComponents">
+    <ItemGroup>
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'onnxruntime'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'onnxruntime_providers_shared'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'DirectML'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'NPUDetect'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.Widgets'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.AI.MachineLearning'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.AI.Text'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.AI.Imaging'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.AI.ContentSafety'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.Workloads'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.Workloads.Resources'" />
+      <_DroppedWinAppSdkPayload Include="@(None);@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Windows.Workloads.Resources_ec'" />
+      <None Remove="@(_DroppedWinAppSdkPayload)" />
+      <ReferenceCopyLocalPaths Remove="@(_DroppedWinAppSdkPayload)" />
+      <!-- 增量发布不会删掉上次留下的文件，这里按文件名清掉输出目录里的副本。 -->
+      <_StaleWinAppSdkPayload Include="$(OutputPath)%(Filename)%(Extension)" />
+      <_StaleWinAppSdkPayload Include="$(OutputPath)NpuDetect\%(Filename)%(Extension)" />
+      <_StaleWinAppSdkPayload Include="$(PublishDir)%(Filename)%(Extension)" />
+      <_StaleWinAppSdkPayload Include="$(PublishDir)NpuDetect\%(Filename)%(Extension)" />
+    </ItemGroup>
+    <Delete Files="@(_StaleWinAppSdkPayload)" TreatErrorsAsWarnings="true" />
+    <Message Importance="high" Text="已从发布中移除未使用的 Windows App SDK 文件：@(_DroppedWinAppSdkPayload->'%(Filename)%(Extension)', ', ')" />
+  </Target>
+  <!-- 增量发布不会删除已经不再输出的旧文件，包体会一直堆着上次的运行库。 -->
+  <Target Name="CleanPublishOutput" BeforeTargets="PrepareForPublish" Condition="'$(PublishDir)' != '' and Exists('$(PublishDir)')">
+    <RemoveDir Directories="$(PublishDir)" />
+    <MakeDir Directories="$(PublishDir)" />
+  </Target>
   <!-- 非打包 WinUI 项目需显式发布编译后的 XAML 和应用资源索引。 -->
   <Target Name="PublishWinUIResources" AfterTargets="Publish">
     <ItemGroup>

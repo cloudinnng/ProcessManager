@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace ProcessManager.Win.Services;
 
@@ -15,7 +16,8 @@ public sealed class QuickSearchStore
         try
         {
             if (!File.Exists(_path)) return [];
-            var items = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_path));
+            // 源生成序列化，避免裁剪后反射序列化被关掉，常用搜索读不出来。
+            var items = JsonSerializer.Deserialize(File.ReadAllText(_path), QuickSearchJsonContext.Default.ListString);
             return (items ?? [])
                 .Where(item => !string.IsNullOrWhiteSpace(item))
                 .Select(item => item.Trim())
@@ -35,7 +37,7 @@ public sealed class QuickSearchStore
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-            File.WriteAllText(_path, JsonSerializer.Serialize(items.Take(MaxItems)));
+            File.WriteAllText(_path, JsonSerializer.Serialize(items.Take(MaxItems).ToList(), QuickSearchJsonContext.Default.ListString));
         }
         catch (Exception)
         {
@@ -43,3 +45,11 @@ public sealed class QuickSearchStore
         }
     }
 }
+
+#region 裁剪安全的 JSON 契约
+
+[JsonSourceGenerationOptions]
+[JsonSerializable(typeof(List<string>))]
+internal sealed partial class QuickSearchJsonContext : JsonSerializerContext;
+
+#endregion

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -7,6 +8,8 @@ using ProcessManager.Win.Services;
 
 namespace ProcessManager.Win.Controls;
 
+// {Binding Query} 按属性名反射取值，裁剪发布时必须保留公共属性。
+[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)]
 public sealed class SearchHighlightState : DependencyObject
 {
     public static readonly DependencyProperty QueryProperty = DependencyProperty.Register(
