@@ -88,16 +88,22 @@
                     <ColumnDefinition Width="2*" MinWidth="160" />
                     <ColumnDefinition Width="90" />
                     <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="90" />
                     <ColumnDefinition Width="120" />
                     <ColumnDefinition Width="3*" />
                 </Grid.ColumnDefinitions>
                 <Button x:Name="NameSortButton" Content="进程名称 ↑" Tag="Name" Style="{StaticResource SortHeaderStyle}" Click="SortHeader_Click" />
                 <Button x:Name="IdSortButton" Grid.Column="1" Content="PID" Tag="Id" Style="{StaticResource SortHeaderStyle}" Click="SortHeader_Click" />
-                <Button x:Name="CpuSortButton" Grid.Column="2" Content="CPU" Tag="Cpu" Style="{StaticResource SortHeaderStyle}" Click="SortHeader_Click" />
-                <Button x:Name="MemorySortButton" Grid.Column="3" Content="内存" Tag="Memory" Style="{StaticResource SortHeaderStyle}" Click="SortHeader_Click" />
-                <TextBlock Grid.Column="4" Text="可执行文件路径" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="2" Text="父 PID" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <Button x:Name="CpuSortButton" Grid.Column="3" Content="CPU" Tag="Cpu" Style="{StaticResource SortHeaderStyle}" Click="SortHeader_Click" />
+                <Button x:Name="MemorySortButton" Grid.Column="4" Content="内存" Tag="Memory" Style="{StaticResource SortHeaderStyle}" Click="SortHeader_Click" />
+                <TextBlock Grid.Column="5" Text="可执行文件路径" FontWeight="SemiBold" VerticalAlignment="Center" />
             </Grid>
-            <ListView x:Name="ProcessList" Grid.Row="1" SelectionMode="Extended" SelectionChanged="Process_SelectionChanged" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="进程列表">
+            <!-- 关掉行进入/删除动画，折叠展开才不会被默认过渡拖慢。点击箭头也不要把该行滚进视口。 -->
+            <ListView x:Name="ProcessList" Grid.Row="1" SelectionMode="Extended" SelectionChanged="Process_SelectionChanged" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.BringIntoViewOnFocusChange="False" PreviewKeyDown="ProcessList_PreviewKeyDown" AutomationProperties.Name="进程列表">
+                <ListView.ItemContainerTransitions>
+                    <TransitionCollection />
+                </ListView.ItemContainerTransitions>
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="services:ProcessSnapshot">
                         <Grid Padding="0,7" ColumnSpacing="16">
@@ -105,25 +111,32 @@
                                 <ColumnDefinition Width="2*" MinWidth="160" />
                                 <ColumnDefinition Width="90" />
                                 <ColumnDefinition Width="90" />
+                                <ColumnDefinition Width="90" />
                                 <ColumnDefinition Width="120" />
                                 <ColumnDefinition Width="3*" />
                             </Grid.ColumnDefinitions>
-                            <Grid ColumnSpacing="8">
+                            <!-- 只缩进名称。PID、父 PID、CPU、内存、路径仍按列对齐。 -->
+                            <Grid Margin="{x:Bind IndentMargin, Mode=OneWay}" ColumnSpacing="8" VerticalAlignment="Center">
                                 <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="20" />
                                     <ColumnDefinition Width="20" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <controls:ProcessIcon FilePath="{x:Bind FilePath, Mode=OneWay}" Width="20" Height="20" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1" Text="{x:Bind Name, Mode=OneWay}" controls:SearchHighlight.Query="{Binding Query, Source={StaticResource SearchHighlightState}}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
+                                <Button Grid.Column="0" Width="20" Height="20" MinWidth="0" MinHeight="0" Padding="0" Background="Transparent" BorderThickness="0" VerticalAlignment="Center" IsTabStop="False" AllowFocusOnInteraction="False" Visibility="{x:Bind ExpanderVisibility, Mode=OneWay}" Tag="{x:Bind Id}" Click="ToggleExpand_Click" ToolTipService.ToolTip="{x:Bind ExpandToolTip, Mode=OneWay}" AutomationProperties.Name="{x:Bind ExpandToolTip, Mode=OneWay}">
+                                    <FontIcon Glyph="{x:Bind ExpandGlyph, Mode=OneWay}" FontSize="12" />
+                                </Button>
+                                <controls:ProcessIcon Grid.Column="1" FilePath="{x:Bind FilePath, Mode=OneWay}" Width="20" Height="20" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="2" Text="{x:Bind Name, Mode=OneWay}" controls:SearchHighlight.Query="{Binding Query, Source={StaticResource SearchHighlightState}}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
                                     <ToolTipService.ToolTip>
                                         <TextBlock Text="{x:Bind Name, Mode=OneWay}" controls:SearchHighlight.Query="{Binding Query, Source={StaticResource SearchHighlightState}}" />
                                     </ToolTipService.ToolTip>
                                 </TextBlock>
                             </Grid>
                             <TextBlock Grid.Column="1" Text="{x:Bind Id}" controls:SearchHighlight.Query="{Binding Query, Source={StaticResource SearchHighlightState}}" />
-                            <TextBlock Grid.Column="2" Text="{x:Bind CpuText, Mode=OneWay}" />
-                            <TextBlock Grid.Column="3" Text="{x:Bind MemoryText, Mode=OneWay}" />
-                            <TextBlock Grid.Column="4" Text="{x:Bind PathText, Mode=OneWay}" controls:SearchHighlight.Query="{Binding Query, Source={StaticResource SearchHighlightState}}" TextTrimming="CharacterEllipsis">
+                            <TextBlock Grid.Column="2" Text="{x:Bind ParentIdText, Mode=OneWay}" />
+                            <TextBlock Grid.Column="3" Text="{x:Bind CpuText, Mode=OneWay}" />
+                            <TextBlock Grid.Column="4" Text="{x:Bind MemoryText, Mode=OneWay}" />
+                            <TextBlock Grid.Column="5" Text="{x:Bind PathText, Mode=OneWay}" controls:SearchHighlight.Query="{Binding Query, Source={StaticResource SearchHighlightState}}" TextTrimming="CharacterEllipsis">
                                 <ToolTipService.ToolTip>
                                     <StackPanel MaxWidth="720" Spacing="4">
                                         <TextBlock Text="可执行文件路径" FontWeight="SemiBold" />

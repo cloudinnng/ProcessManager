@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Management;
 using System.Runtime.InteropServices;
+using Microsoft.UI.Xaml;
 
 namespace ProcessManager.Win.Services;
 
@@ -35,6 +36,53 @@ public sealed class ProcessSnapshot : INotifyPropertyChanged
     public long? MemoryBytes => _memoryBytes;
     public string? FilePath => _filePath;
     public string? CommandLine => _commandLine;
+
+    #region 进程树
+    // 已核对过的父进程。null 表示父进程已退出、PID 被复用，或启动时间对不上，界面上它就是根节点。
+    public int? ParentProcessId { get; private set; }
+    // 与树上的父子关系一致。没有确认到父进程时显示“—”，不写一个已经对不上的 PID。
+    public string ParentIdText => ParentProcessId is int parentId ? parentId.ToString() : "—";
+
+    private const double IndentPerLevel = 16;
+    private const string ExpandedGlyph = "\uE70D";
+    private const string CollapsedGlyph = "\uE76C";
+    private int _depth;
+    private bool _hasChildren;
+    private bool _isExpanded = true;
+
+    public int Depth => _depth;
+    public bool HasChildren => _hasChildren;
+    public bool IsExpanded => _isExpanded;
+    public Thickness IndentMargin => new(_depth * IndentPerLevel, 0, 0, 0);
+    public string ExpandGlyph => _isExpanded ? ExpandedGlyph : CollapsedGlyph;
+    public string ExpandToolTip => _isExpanded ? "折叠子进程" : "展开子进程";
+    public Visibility ExpanderVisibility => _hasChildren ? Visibility.Visible : Visibility.Collapsed;
+
+    internal void AssignParent(int parentProcessId) => ParentProcessId = parentProcessId;
+
+    internal void SetTreeState(int depth, bool hasChildren, bool isExpanded)
+    {
+        if (_depth != depth)
+        {
+            _depth = depth;
+            Notify(nameof(Depth));
+            Notify(nameof(IndentMargin));
+        }
+        if (_hasChildren != hasChildren)
+        {
+            _hasChildren = hasChildren;
+            Notify(nameof(HasChildren));
+            Notify(nameof(ExpanderVisibility));
+        }
+        if (_isExpanded != isExpanded)
+        {
+            _isExpanded = isExpanded;
+            Notify(nameof(IsExpanded));
+            Notify(nameof(ExpandGlyph));
+            Notify(nameof(ExpandToolTip));
+        }
+    }
+    #endregion
 
     public string CpuText => CpuPercent is { } cpu ? $"{cpu:F1}%" : "—";
     public string MemoryText => MemoryBytes is { } bytes ? $"{bytes / 1024d / 1024:F1} MB" : "—";
@@ -86,6 +134,13 @@ public sealed class ProcessSnapshot : INotifyPropertyChanged
             Notify(nameof(DetailsText));
             searchChanged = true;
         }
+        if (ParentProcessId != source.ParentProcessId)
+        {
+            ParentProcessId = source.ParentProcessId;
+            Notify(nameof(ParentProcessId));
+            Notify(nameof(ParentIdText));
+        }
+        SetTreeState(source.Depth, source.HasChildren, source.IsExpanded);
         if (searchChanged) Notify(nameof(SearchText));
     }
 
@@ -150,8 +205,115 @@ public sealed class ProcessService
             }
         }
         _previous = current;
+        LinkParents(result);
         return result;
     }
+
+    #region 父子关系
+    // 父进程 ID 来自创建时的记录。父进程退出后号码还在；号码再分给新进程时，用启动时间拆开，避免挂错人。
+    private static void LinkParents(List<ProcessSnapshot> processes)
+    {
+        Dictionary<int, int> parents = ReadParentProcessIds();
+        Dictionary<int, ProcessSnapshot> byId = new(processes.Count);
+        foreach (ProcessSnapshot process in processes) byId.TryAdd(process.Id, process);
+
+        int linked = 0;
+        int missing = 0;
+        int reused = 0;
+        int unverified = 0;
+        foreach (ProcessSnapshot process in processes)
+        {
+            if (!parents.TryGetValue(process.Id, out int parentId) || parentId == process.Id)
+            {
+                unverified++;
+                continue;
+            }
+            if (!byId.TryGetValue(parentId, out ProcessSnapshot? parent))
+            {
+                missing++;
+                continue;
+            }
+            if (parent.StartTimeTicks is not long parentStart || process.StartTimeTicks is not long childStart)
+            {
+                unverified++;
+                continue;
+            }
+            // 真正的父进程一定更早启动。当前占用这个 PID 的进程如果更晚，说明号码已被复用。
+            if (parentStart >= childStart)
+            {
+                reused++;
+                Trace.WriteLine($"[ProcessTree] 父进程 PID 已复用，不建立关系：子进程 {process.Id} {process.Name}，当前 PID {parentId} {parent.Name}");
+                continue;
+            }
+            process.AssignParent(parentId);
+            linked++;
+        }
+        Trace.WriteLine($"[ProcessTree] 进程 {processes.Count} 个，建立父子关系 {linked} 个，父进程已退出 {missing} 个，PID 复用已拆开 {reused} 个，启动时间无法确认 {unverified} 个");
+    }
+
+    private static Dictionary<int, int> ReadParentProcessIds()
+    {
+        Dictionary<int, int> parents = new();
+        nint snapshot = CreateToolhelp32Snapshot(Th32CsSnapProcess, 0);
+        if (snapshot == InvalidSnapshot)
+        {
+            Trace.WriteLine($"[ProcessTree] 无法读取父进程：Win32 错误 {Marshal.GetLastWin32Error()}");
+            return parents;
+        }
+        try
+        {
+            ProcessEntry32 entry = new() { Size = (uint)Marshal.SizeOf<ProcessEntry32>() };
+            if (!Process32First(snapshot, ref entry))
+            {
+                Trace.WriteLine($"[ProcessTree] 进程快照为空：结构大小 {entry.Size}，Win32 错误 {Marshal.GetLastWin32Error()}");
+                return parents;
+            }
+            do parents[(int)entry.ProcessId] = (int)entry.ParentProcessId;
+            while (Process32Next(snapshot, ref entry));
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"[ProcessTree] 读取父进程失败：{ex.GetType().Name} {ex.Message}");
+            parents.Clear();
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+        return parents;
+    }
+
+    private const uint Th32CsSnapProcess = 0x00000002;
+    private static readonly nint InvalidSnapshot = -1;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry32
+    {
+        public uint Size;
+        public uint Usage;
+        public uint ProcessId;
+        public nint DefaultHeapId;
+        public uint ModuleId;
+        public uint ThreadCount;
+        public uint ParentProcessId;
+        public int PriorityClassBase;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string ExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool Process32First(nint snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool Process32Next(nint snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(nint handle);
+    #endregion
 
     public static void Terminate(ProcessSnapshot target)
     {

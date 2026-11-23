@@ -1,3 +1,4 @@
 - 保持精简，用户没提到的功能不要擅自添加。
-- 所有平台构建产物统一放到 builds 目录下。
-- 每次修改后都构建到 builds\ProcessManager-Win\publish ，构建前杀掉用户可能运行中的软件，完成后拉起进程便于查看。
+- 所有平台构建产物统一放到 builds 目录下。源码与产物按平台分目录，互不混放。
+- Windows（当前）：源码 `ProcessManager-Win/`，发布 `builds/ProcessManager-Win/publish/`（`win-x64`、`win-arm64`）。每次修改后构建到该目录；构建前杀掉可能正在运行的进程，完成后拉起便于查看。
+- macOS（计划，目录尚未创建）：源码 `ProcessManager-Mac/`，界面用 SwiftUI，进程数据走系统接口。发布 `builds/ProcessManager-Mac/publish/`。只在 macOS 上走这条路线，不改 Windows 工程。
