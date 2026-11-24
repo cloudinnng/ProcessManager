@@ -34,14 +34,16 @@ public static class ProcessSearch
 
     private static int FieldIndex(ProcessSnapshot process, string term)
     {
-        // 名称匹配时允许省略或带上 .exe，与 SearchText 的匹配规则保持一致。
-        if (Hit(process.Name, term) ||
-            (!process.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && Hit(process.Name + ".exe", term)))
-            return 0;
+        // 文件说明和原始 exe 进程名都按名称匹配，允许省略或带上 .exe。
+        if (NameHit(process.Name, term) || NameHit(process.ProcessName, term)) return 0;
         if (Hit(process.Id.ToString(), term)) return 1;
         if (Hit(process.FilePath, term)) return 2;
         return 3;
     }
+
+    private static bool NameHit(string name, string term) =>
+        Hit(name, term) ||
+        (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && Hit(name + ".exe", term));
 
     private static bool Hit(string? text, string term) =>
         text is not null && text.Replace('/', '\\').Contains(term, StringComparison.OrdinalIgnoreCase);

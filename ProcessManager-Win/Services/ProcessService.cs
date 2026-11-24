@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.UI.Xaml;
 
 namespace ProcessManager.Win.Services;
@@ -16,10 +17,11 @@ public sealed class ProcessSnapshot : INotifyPropertyChanged
     private string? _commandLine;
 
     public ProcessSnapshot(int id, string name, long? startTimeTicks, double? cpuPercent, long? memoryBytes,
-        string? filePath, string? commandLine = null)
+        string? filePath, string? commandLine = null, string? displayName = null)
     {
         Id = id;
-        _name = name;
+        ProcessName = name;
+        _name = string.IsNullOrWhiteSpace(displayName) ? name : displayName;
         StartTimeTicks = startTimeTicks;
         _cpuPercent = cpuPercent;
         _memoryBytes = memoryBytes;
@@ -31,6 +33,8 @@ public sealed class ProcessSnapshot : INotifyPropertyChanged
 
     public int Id { get; }
     public string Name => _name;
+    // exe 的原始进程名。Name 优先显示文件说明，原名称保留用于搜索。
+    public string ProcessName { get; }
     public long? StartTimeTicks { get; private set; }
     public double? CpuPercent => _cpuPercent;
     public long? MemoryBytes => _memoryBytes;
@@ -88,7 +92,7 @@ public sealed class ProcessSnapshot : INotifyPropertyChanged
     public string MemoryText => MemoryBytes is { } bytes ? $"{bytes / 1024d / 1024:F1} MB" : "—";
     public string PathText => FilePath ?? "不可访问";
     public string DetailsText => $"路径：{PathText}\n命令行：{CommandLine ?? "不可访问"}";
-    public string SearchText => $"{Id}\n{Name}\n{(Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? Name : Name + ".exe")}\n{FilePath}\n{CommandLine}"
+    public string SearchText => $"{Id}\n{Name}\n{ProcessName}\n{(ProcessName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? ProcessName : ProcessName + ".exe")}\n{FilePath}\n{CommandLine}"
         .Replace('/', '\\');
     public bool CanTerminate => Id > 4 && Id != Environment.ProcessId && StartTimeTicks.HasValue;
 
@@ -152,6 +156,7 @@ public sealed class ProcessSnapshot : INotifyPropertyChanged
 public sealed class ProcessService
 {
     private Dictionary<(int Id, long Start), (TimeSpan Cpu, long Timestamp)> _previous = [];
+    private readonly Dictionary<string, string?> _displayNames = new(StringComparer.OrdinalIgnoreCase);
     private sealed record SearchDetails(long? StartTimeTicks, string? FilePath, string? CommandLine);
 
     public List<ProcessSnapshot> Capture()
@@ -187,8 +192,8 @@ public sealed class ProcessService
                         current[key] = (cpuTime, timestamp);
                     }
 
-                    string? path = null;
-                    try { path = process.MainModule?.FileName; }
+                    string? path = ReadImagePath(id);
+                    try { path ??= process.MainModule?.FileName; }
                     catch (Exception ex) when (IsUnavailable(ex)) { }
                     details.TryGetValue(id, out var extra);
                     // WMI 的时间精度为微秒；核对启动时间，避免 PID 复用时混入旧进程信息。
@@ -196,7 +201,8 @@ public sealed class ProcessService
                         Math.Abs(start.Value - extra.StartTimeTicks.Value) >= TimeSpan.TicksPerMillisecond))
                         extra = null;
                     path ??= extra?.FilePath;
-                    result.Add(new(id, name, start, usage, memory, path, extra?.CommandLine));
+                    string? displayName = ReadDisplayName(path);
+                    result.Add(new(id, name, start, usage, memory, path, extra?.CommandLine, displayName));
                 }
                 catch (Exception ex) when (IsUnavailable(ex))
                 {
@@ -313,6 +319,56 @@ public sealed class ProcessService
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint handle);
+    #endregion
+
+    #region 进程名称
+    // 与任务管理器“进程”页一致：优先显示文件说明。按路径缓存，避免每次刷新重复读版本资源。
+    private string? ReadDisplayName(string? path)
+    {
+        if (path is null) return null;
+        if (_displayNames.TryGetValue(path, out string? displayName)) return displayName;
+        try
+        {
+            displayName = FileVersionInfo.GetVersionInfo(path).FileDescription;
+        }
+        catch (Exception ex) when (IsUnavailable(ex) || ex is IOException or ArgumentException)
+        {
+            displayName = null;
+        }
+        if (string.IsNullOrWhiteSpace(displayName)) displayName = null;
+        _displayNames[path] = displayName;
+        return displayName;
+    }
+
+    // PROCESS_QUERY_LIMITED_INFORMATION 不需要管理员权限，普通权限下也能取得多数高权限进程的路径。
+    private static string? ReadImagePath(int id)
+    {
+        nint process = OpenProcess(ProcessQueryLimitedInformation, false, id);
+        if (process == 0) return null;
+        try
+        {
+            for (int capacity = 1024; ; capacity = 32768)
+            {
+                StringBuilder path = new(capacity);
+                uint size = (uint)path.Capacity;
+                if (QueryFullProcessImageName(process, 0, path, ref size)) return path.ToString();
+                if (Marshal.GetLastWin32Error() != ErrorInsufficientBuffer || capacity == 32768) return null;
+            }
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
+    }
+
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const int ErrorInsufficientBuffer = 122;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint OpenProcess(uint access, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageName(nint process, uint flags, StringBuilder path, ref uint size);
     #endregion
 
     public static void Terminate(ProcessSnapshot target)
